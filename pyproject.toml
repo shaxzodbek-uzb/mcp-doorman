@@ -5,7 +5,7 @@ description = "Secure-by-default FastAPI->MCP bridge. Deny-by-default exposure, 
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Shaxzodbek Sobirov", email = "shaxzodbek@blaze.uz" }]
+authors = [{ name = "Shaxzodbek Qambaraliyev", email = "shaxzodbek@blaze.uz" }]
 keywords = ["mcp", "fastapi", "model-context-protocol", "oauth", "security", "rate-limit", "pii-redaction", "audit", "agents", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",

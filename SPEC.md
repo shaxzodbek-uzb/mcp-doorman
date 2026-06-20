@@ -79,7 +79,7 @@ examples/              # runnable snippets
 ```
 
 Distribution name `mcp-doorman`; import package `mcp_doorman`. Python >=3.10. License MIT
-(holder "Shaxzodbek Sobirov / Blaze"). The only hard dependency is `pydantic-settings`;
+(holder "Shaxzodbek Qambaraliyev / Blaze"). The only hard dependency is `pydantic-settings`;
 everything MCP/FastAPI-specific is an **optional extra**, lazily imported. The `guard`
 pipeline and all five guarantees are exercisable and tested with **zero** optional deps.
 

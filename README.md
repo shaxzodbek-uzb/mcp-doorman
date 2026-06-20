@@ -147,7 +147,7 @@ standing one up.
 
 ## License
 
-MIT © 2026 Shaxzodbek Sobirov / Blaze. See [LICENSE](LICENSE).
+MIT © 2026 Shaxzodbek Qambaraliyev / Blaze. See [LICENSE](LICENSE).
 
 [fam]: https://github.com/tadata-org/fastapi_mcp
 [fastmcp]: https://github.com/jlowin/fastmcp
