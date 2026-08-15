@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
 from .errors import ConfigError, DestructiveNotAllowed, NotExposed
+from .ratelimit import parse_rate_spec
 
 #: HTTP methods that mutate state. Exposing any of these requires ``destructive=True``.
 DESTRUCTIVE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -32,7 +33,11 @@ class ToolSpec:
     destructive: bool = False
     read_only: bool = True
     redact: tuple[str, ...] = ()
+    #: Per-tool rate override, enforced *in addition to* the Doorman-wide limit.
     rate: str | None = None
+    #: What one call to this tool costs, in whatever unit the budget counts. Defaults
+    #: to 1.0, so an unannotated tool behaves as "one call".
+    cost: float = 1.0
 
     def annotations(self) -> dict:
         """MCP tool annotations a client can use to gate calls."""
@@ -47,6 +52,7 @@ def expose(
     description: str | None = None,
     redact: Sequence[str] = (),
     rate: str | None = None,
+    cost: float = 1.0,
 ) -> Callable:
     """Mark a FastAPI route handler as an MCP tool (deny-by-default opt-in).
 
@@ -54,7 +60,20 @@ def expose(
     attribute and returns the function **unchanged**, so it still works as an ordinary
     FastAPI route regardless of decorator order. Destructive-method enforcement happens
     later, in :meth:`Registry.add_route`, where the route's HTTP methods are known.
+
+    Args:
+        rate: An extra rate limit for this tool alone, in the same grammar as the
+            Doorman-wide spec (e.g. ``"5/min per_caller"``). Enforced *in addition to*
+            the global limit, never instead of it — tightening one tool can't loosen
+            the rest. Validated here, so a malformed spec fails at import time rather
+            than on the first call.
+        cost: What one call costs against a configured budget. Use it to say that a
+            tool hitting a paid API is worth more than a cheap lookup.
     """
+    if rate is not None:
+        parse_rate_spec(rate)  # fail at decoration time, not on the first call
+    if cost < 0:
+        raise ConfigError(f"cost must be >= 0, got {cost!r}")
 
     def decorator(func: Callable) -> Callable:
         setattr(
@@ -67,6 +86,7 @@ def expose(
                 "description": description,
                 "redact": tuple(redact),
                 "rate": rate,
+                "cost": float(cost),
             },
         )
         return func
@@ -127,6 +147,8 @@ class Registry:
             read_only=read_only,
             redact=marker["redact"],
             rate=marker["rate"],
+            # .get() so a spec stamped by an older release still registers.
+            cost=float(marker.get("cost", 1.0)),
         )
         if spec.name in self._specs:
             raise ConfigError(f"duplicate tool name {spec.name!r}")

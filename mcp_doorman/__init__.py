@@ -15,6 +15,7 @@ from .auth import AccessToken, AuthConfig, StaticVerifier, TokenVerifier, oauth
 from .config import Settings
 from .doorman import Doorman
 from .errors import (
+    BudgetExceeded,
     ConfigError,
     DestructiveNotAllowed,
     DoormanError,
@@ -63,6 +64,7 @@ __all__ = [
     "Unauthorized",
     "Forbidden",
     "RateLimited",
+    "BudgetExceeded",
     "ConfigError",
     "__version__",
 ]

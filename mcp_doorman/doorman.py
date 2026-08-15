@@ -17,10 +17,18 @@ from typing import Any
 from .audit import AuditRecord, AuditSink, make_sink, shape
 from .auth import AuthConfig, oauth
 from .config import Settings
-from .errors import ConfigError, DoormanError, Forbidden, NotExposed, RateLimited, Unauthorized
+from .errors import (
+    BudgetExceeded,
+    ConfigError,
+    DoormanError,
+    Forbidden,
+    NotExposed,
+    RateLimited,
+    Unauthorized,
+)
 from .exposure import Registry, ToolSpec
 from .principal import Principal, Transport
-from .ratelimit import RateLimiter
+from .ratelimit import RateLimiter, Rule, parse_rate_spec
 from .redaction import Redactor
 from .scopes import authorize
 
@@ -38,6 +46,7 @@ class Doorman:
         *,
         auth: AuthConfig | None = None,
         rate_limit: str | None = _DEFAULT,  # type: ignore[assignment]
+        budget: str | None = _DEFAULT,  # type: ignore[assignment]
         redact: Sequence[str] = (),
         audit: str | AuditSink = "stderr",
         tenant_claim: str = "tenant_id",
@@ -51,6 +60,11 @@ class Doorman:
         self._redactor = Redactor().with_extra_keys(redact)
         spec = self._settings.rate_limit if rate_limit is _DEFAULT else rate_limit
         self._rate = RateLimiter(spec, clock=clock)
+        budget_spec = self._settings.budget if budget is _DEFAULT else budget
+        # A separate limiter, not extra rules on the first one: a budget counts cost
+        # units and a rate limit counts calls, so they must not share buckets.
+        self._budget = RateLimiter(budget_spec, clock=clock)
+        self._tool_rules: dict[str, tuple[Rule, ...]] = {}
         self._sink = make_sink(audit)
         self._tenant_claim = tenant_claim
         if app is not None:
@@ -124,6 +138,7 @@ class Doorman:
         reason: str,
         scopes: tuple[str, ...],
         started: float,
+        cost: float = 1.0,
     ) -> None:
         self._sink.emit(
             AuditRecord(
@@ -136,8 +151,30 @@ class Doorman:
                 arg_shape=shape(args),
                 duration_ms=(time.perf_counter() - started) * 1000.0,
                 scopes_required=scopes,
+                cost=cost,
             )
         )
+
+    def _rules_for(self, spec: ToolSpec) -> tuple[Rule, ...]:
+        """Parsed per-tool rate rules, namespaced so they get their own buckets.
+
+        Namespaced by tool name rather than by the spec string: two tools sharing
+        ``"5/min per_caller"`` must each get five per minute, not five between them.
+        """
+        if spec.rate is None:
+            return ()
+        cached = self._tool_rules.get(spec.name)
+        if cached is None:
+            cached = tuple(
+                (f"tool:{spec.name}", scope, capacity, refill)
+                for scope, capacity, refill in parse_rate_spec(spec.rate)
+            )
+            self._tool_rules[spec.name] = cached
+        return cached
+
+    def remaining_budget(self, *, tool: str, caller: str) -> float:
+        """Cost units this caller may still spend on ``tool``. ``inf`` with no budget."""
+        return self._budget.remaining(tool=tool, caller=caller)
 
     def _rate_caller(self, principal: Principal, caller_hint: str | None) -> str:
         """The key for per-caller rate limiting.
@@ -151,31 +188,87 @@ class Doorman:
         return caller_hint or "anonymous"
 
     def _guard_prelude(
-        self, name: str, args: dict, principal: Principal, started: float,
+        self,
+        name: str,
+        args: dict,
+        principal: Principal,
+        started: float,
         caller_hint: str | None,
     ) -> ToolSpec:
         """Run the deny -> authorize -> rate steps, auditing every failure exit."""
         try:
             spec = self._registry.get(name)
         except NotExposed:
-            self._emit(name=name, args=args, principal=principal, status="error",
-                       reason="not_exposed", scopes=(), started=started)
+            self._emit(
+                name=name,
+                args=args,
+                principal=principal,
+                status="error",
+                reason="not_exposed",
+                scopes=(),
+                started=started,
+            )
             raise
         try:
             authorize(spec, principal)
         except Unauthorized:
-            self._emit(name=name, args=args, principal=principal, status="denied",
-                       reason="unauthorized", scopes=spec.scopes, started=started)
+            self._emit(
+                name=name,
+                args=args,
+                principal=principal,
+                status="denied",
+                reason="unauthorized",
+                scopes=spec.scopes,
+                started=started,
+            )
             raise
         except Forbidden:
-            self._emit(name=name, args=args, principal=principal, status="denied",
-                       reason="forbidden:scope", scopes=spec.scopes, started=started)
+            self._emit(
+                name=name,
+                args=args,
+                principal=principal,
+                status="denied",
+                reason="forbidden:scope",
+                scopes=spec.scopes,
+                started=started,
+            )
             raise
+        caller = self._rate_caller(principal, caller_hint)
         try:
-            self._rate.check(tool=name, caller=self._rate_caller(principal, caller_hint))
+            self._rate.check(tool=name, caller=caller, extra_rules=self._rules_for(spec))
         except RateLimited:
-            self._emit(name=name, args=args, principal=principal, status="rate_limited",
-                       reason="rate_limited", scopes=spec.scopes, started=started)
+            self._emit(
+                name=name,
+                args=args,
+                principal=principal,
+                status="rate_limited",
+                reason="rate_limited",
+                scopes=spec.scopes,
+                started=started,
+                cost=spec.cost,
+            )
+            raise
+        # Budget last, so a call refused for being too frequent doesn't also spend
+        # allowance it never got to use.
+        try:
+            self._budget.check(
+                tool=name,
+                caller=caller,
+                cost=spec.cost,
+                error=BudgetExceeded,
+                label="budget",
+            )
+        except BudgetExceeded:
+            self._emit(
+                name=name,
+                args=args,
+                principal=principal,
+                status="budget_exceeded",
+                reason="budget_exceeded",
+                scopes=spec.scopes,
+                started=started,
+                cost=spec.cost,
+            )
             raise
         return spec
 
@@ -198,12 +291,28 @@ class Doorman:
         try:
             result = call(args)
         except Exception:
-            self._emit(name=name, args=args, principal=principal, status="error",
-                       reason="handler_error", scopes=spec.scopes, started=started)
+            self._emit(
+                name=name,
+                args=args,
+                principal=principal,
+                status="error",
+                reason="handler_error",
+                scopes=spec.scopes,
+                started=started,
+                cost=spec.cost,
+            )
             raise
         redacted = self._redactor.with_extra_keys(spec.redact).redact(result)
-        self._emit(name=name, args=args, principal=principal, status="ok",
-                   reason="ok", scopes=spec.scopes, started=started)
+        self._emit(
+            name=name,
+            args=args,
+            principal=principal,
+            status="ok",
+            reason="ok",
+            scopes=spec.scopes,
+            started=started,
+            cost=spec.cost,
+        )
         return redacted
 
     async def aguard_call(
@@ -223,12 +332,28 @@ class Doorman:
             if inspect.isawaitable(result):
                 result = await result
         except Exception:
-            self._emit(name=name, args=args, principal=principal, status="error",
-                       reason="handler_error", scopes=spec.scopes, started=started)
+            self._emit(
+                name=name,
+                args=args,
+                principal=principal,
+                status="error",
+                reason="handler_error",
+                scopes=spec.scopes,
+                started=started,
+                cost=spec.cost,
+            )
             raise
         redacted = self._redactor.with_extra_keys(spec.redact).redact(result)
-        self._emit(name=name, args=args, principal=principal, status="ok",
-                   reason="ok", scopes=spec.scopes, started=started)
+        self._emit(
+            name=name,
+            args=args,
+            principal=principal,
+            status="ok",
+            reason="ok",
+            scopes=spec.scopes,
+            started=started,
+            cost=spec.cost,
+        )
         return redacted
 
     # -- transport --------------------------------------------------------------------

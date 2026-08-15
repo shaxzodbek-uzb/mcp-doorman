@@ -45,8 +45,10 @@ makes the **secure configuration the default**. Insecure-by-omission is impossib
    unless the caller presents a **verified** principal with sufficient scopes. When there's
    no verified context (no token, or STDIO where other bridges silently return `None` and
    *bypass* every check), doorman **denies**.
-3. **Rate limiting + call budget.** Per-caller and per-tool token buckets, in-process, no
-   Redis — the direct answer to the runaway-loop failure mode.
+3. **Rate limiting + cost budget.** Per-caller and per-tool token buckets, in-process, no
+   Redis — the direct answer to the runaway-loop failure mode. Tighten one expensive tool
+   with `@expose(rate=…)`, and cap total spend with `@expose(cost=…)` plus a
+   [budget](#rate-limits-and-budgets). Both fail closed.
 4. **PII redaction at the source.** Sensitive keys (`*_token`, `email`, …) and value
    patterns (email/phone/SSN/card) are redacted from tool **results** before they reach the
    model, and from anything the audit layer would record.
@@ -97,6 +99,60 @@ mcp-doorman lint myapp.main:app   # lists tools, scopes, destructive flags; exit
 mcp-doorman doctor                # settings + whether the [mcp] extra is installed
 ```
 
+## Rate limits and budgets
+
+A rate limit answers *how often*. A budget answers *how much*. The runaway-loop failure
+mode needs both: a loop can stay comfortably under 60 calls a minute and still spend a
+fortune if each call hits a paid API.
+
+**Per-tool rate override.** Tighten one tool without loosening the rest:
+
+```python
+@expose(scopes=["reports:read"], rate="5/min per_caller")
+async def generate_report(...): ...
+```
+
+Enforced *in addition to* the Doorman-wide limit, never instead of it. A malformed spec
+raises at decoration time, so it fails on import rather than on the first call.
+
+**Cost budget.** Declare what a tool is worth and cap the total:
+
+```python
+@expose(scopes=["ai:write"], cost=25)      # this one hits a paid API
+async def summarize(...): ...
+
+@expose(scopes=["invoices:read"])          # cost defaults to 1
+async def get_invoice(...): ...
+
+doorman = Doorman(app, auth=..., budget="500/day per_caller")
+```
+
+`summarize` now costs 25 units of that 500; twenty calls exhaust the day. The unit is
+whatever you decide — cents, credits, API calls, seconds. There is **no default budget**:
+a cost unit means nothing until a deployment defines one, and a guessed default would be
+security theatre.
+
+Exceeding it raises `BudgetExceeded` and audits `status="budget_exceeded"`, distinct from
+`rate_limited` so you can tell *calling too fast* from *calling too expensively* — the
+first is fixed by backing off, the second usually isn't. It subclasses `RateLimited`, so
+existing handlers keep working.
+
+Ordering matters and is tested: the budget is checked **after** the rate limit, so a call
+refused for being too frequent keeps its allowance. And rules are probed before any are
+committed, so a rejected call never burns tokens from the limits that would have passed.
+
+```python
+doorman.remaining_budget(tool="summarize", caller="user-1")   # 475.0
+```
+
+Every audit record carries the call's declared `cost`, so spend is reconstructable from
+the log without a second system.
+
+> **In-process, like everything else here.** Buckets live in one process's memory; two
+> replicas each enforce the budget independently. That is the same trade-off the rate
+> limiter already makes — no Redis, no gateway — and the reason this is a guard rail
+> against a runaway loop, not a billing system.
+
 ## How it compares
 
 | | `fastapi_mcp` | `FastMCP.from_fastapi` | **mcp-doorman** |
@@ -104,7 +160,7 @@ mcp-doorman doctor                # settings + whether the [mcp] extra is instal
 | Exposure default | expose-all (opt-out) | expose-all (RouteMap) | **deny-by-default**, destructive gated |
 | Per-tool scopes | by hand in each handler | `require_scopes()` primitive, **bypassed on STDIO** | **enforced at the library layer, fail-closed on STDIO** |
 | Multi-tenant token safety (RFC 8707) | open advisory, replayable | DIY audience checks | **audience binding by default** |
-| Rate / loop & cost guard | none (documented $400) | none ("build it yourself") | **built-in token bucket, no Redis** |
+| Rate / loop & cost guard | none (documented $400) | none ("build it yourself") | **built-in token bucket + cost budget, no Redis** |
 | PII redaction (results) | none | not provided | **redaction-at-source, on by default** |
 | Audit / observability | none built-in | custom middleware | **structured per-call audit (shape, not values)** |
 | Deployment shape | in-process, security DIY | in-process, primitives DIY | **in-process with gateway-grade secure defaults** |
@@ -139,6 +195,10 @@ standing one up.
   (email/phone/SSN/card) are stripped. But a novel secret hidden in free text, or a phone
   shorter than ~9 digits, can slip through — add your own `value_patterns` for stricter
   coverage. Undecodable binary is passed through unscanned.
+- **Limits are per process.** Rate buckets and budgets live in one process's memory, so N
+  replicas each enforce the limit independently and the effective ceiling is N× what you
+  configured. That is the price of "no Redis, no gateway". Size accordingly, or put a
+  shared limiter in front when the exact number matters.
 - **Security bar.** A security-positioned library that ships a redaction bypass hurts more
   than a convenience library would. The fail-closed, redaction-leakage, audit-no-values, and
   rate-limit tests are load-bearing and run on every change (a 6-agent red-team pass shaped
