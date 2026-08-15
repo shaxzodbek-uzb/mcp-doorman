@@ -60,11 +60,13 @@ class AuditRecord:
     caller: str
     tenant: str | None
     transport: str
-    status: str  # "ok" | "denied" | "error" | "rate_limited"
+    status: str  # "ok" | "denied" | "error" | "rate_limited" | "budget_exceeded"
     reason: str
     arg_shape: dict
     duration_ms: float
     scopes_required: tuple[str, ...]
+    #: The tool's declared cost. Safe to log: it is configuration, not caller data.
+    cost: float = 1.0
 
     def as_dict(self) -> dict:
         return {
@@ -77,6 +79,7 @@ class AuditRecord:
             "arg_shape": self.arg_shape,
             "duration_ms": round(self.duration_ms, 3),
             "scopes_required": list(self.scopes_required),
+            "cost": self.cost,
         }
 
 

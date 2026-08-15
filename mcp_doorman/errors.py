@@ -39,5 +39,16 @@ class RateLimited(DoormanError):
         self.retry_after = retry_after
 
 
+class BudgetExceeded(RateLimited):
+    """The caller's cost allowance is spent.
+
+    Distinct from :class:`RateLimited` so a client can tell *calling too fast* from
+    *calling too expensively*: the first is fixed by backing off, the second usually
+    is not. Subclasses ``RateLimited`` so existing ``except RateLimited`` handlers and
+    integration-layer status mapping keep working — a budget refusal is still a
+    "slow down" answer, just an expensive one.
+    """
+
+
 class ConfigError(DoormanError):
     """Invalid configuration (e.g. a remote bind with no auth, or a bad rate spec)."""

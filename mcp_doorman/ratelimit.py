@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from .errors import ConfigError, RateLimited
@@ -30,7 +30,15 @@ _UNIT_SECONDS = {
     "h": 3600.0,
     "hour": 3600.0,
     "hours": 3600.0,
+    "d": 86400.0,
+    "day": 86400.0,
+    "days": 86400.0,
 }
+
+#: One parsed rule: ``(namespace, scope, capacity, refill_per_sec)``. The namespace keeps
+#: rule families in separate buckets, so a per-tool override and the global limit cannot
+#: consume each other's tokens.
+Rule = tuple[str, str, float, float]
 
 _VALID_SCOPES = ("per_caller", "per_tool")
 _RULE_RE = re.compile(
@@ -151,24 +159,64 @@ class RateLimiter:
         while len(self._buckets) >= self._max_buckets:
             self._buckets.popitem(last=False)  # evict the oldest
 
-    def check(self, *, tool: str, caller: str, cost: float = 1.0) -> None:
-        """Enforce all rules. Raises :class:`RateLimited` on the first exhausted bucket.
+    @property
+    def rules(self) -> list[Rule]:
+        """The globally configured rules, namespaced as ``""``."""
+        return [("", scope, capacity, refill) for scope, capacity, refill in self._rules]
 
-        A rule that would fail does not consume tokens from rules checked after it: we
-        probe every relevant bucket first and only commit the takes once all pass.
+    def check(
+        self,
+        *,
+        tool: str,
+        caller: str,
+        cost: float = 1.0,
+        extra_rules: Sequence[Rule] = (),
+        error: type[RateLimited] = RateLimited,
+        label: str = "rate limit",
+    ) -> None:
+        """Enforce the global rules plus ``extra_rules``. Raises on the first exhausted bucket.
+
+        A rule that would fail does not consume tokens from rules checked after it: every
+        relevant bucket is probed first and the takes are committed only once all pass.
+        Per-tool overrides therefore cannot silently burn the global allowance on a call
+        that was going to be rejected anyway.
+
+        ``extra_rules`` are checked in the same transaction rather than by a second
+        :meth:`check` call, which would break that all-or-nothing property.
         """
-        if not self._rules:
+        rules = [*self.rules, *extra_rules]
+        if not rules:
             return
         now = self._clock()
         targets: list[TokenBucket] = []
-        for scope, capacity, refill in self._rules:
-            key = (scope, caller if scope == "per_caller" else tool)
+        for namespace, scope, capacity, refill in rules:
+            key = (f"{namespace}|{scope}", caller if scope == "per_caller" else tool)
             bucket = self._bucket(key, capacity, refill, now)
-            if bucket.retry_after(now, cost) > 0:
-                raise RateLimited(
-                    f"rate limit exceeded for {scope} on {key[1]!r}",
-                    retry_after=bucket.retry_after(now, cost),
+            wait = bucket.retry_after(now, cost)
+            if wait > 0:
+                where = f"{namespace} " if namespace else ""
+                raise error(
+                    f"{label} exceeded for {where}{scope} on {key[1]!r}",
+                    retry_after=wait,
                 )
             targets.append(bucket)
         for bucket in targets:
             bucket.take(now, cost)
+
+    def remaining(self, *, tool: str, caller: str, extra_rules: Sequence[Rule] = ()) -> float:
+        """Smallest number of units available right now across every applicable rule.
+
+        ``inf`` when nothing is configured. Read-only: it refills for elapsed time but
+        never consumes, so calling it cannot affect a subsequent :meth:`check`.
+        """
+        rules = [*self.rules, *extra_rules]
+        if not rules:
+            return float("inf")
+        now = self._clock()
+        available: list[float] = []
+        for namespace, scope, capacity, refill in rules:
+            key = (f"{namespace}|{scope}", caller if scope == "per_caller" else tool)
+            bucket = self._bucket(key, capacity, refill, now)
+            bucket._refill(now)
+            available.append(bucket.tokens)
+        return min(available)

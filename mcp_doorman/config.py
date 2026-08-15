@@ -12,6 +12,10 @@ class Settings(BaseSettings):
 
     endpoint: str = "/mcp"
     rate_limit: str | None = "60/min per_caller; 10/min per_tool"
+    #: Cost ceiling, same grammar as rate_limit but counted in the cost units declared
+    #: by expose(cost=...). Off by default: a cost unit means nothing until a
+    #: deployment defines one, and a guessed default would be security theatre.
+    budget: str | None = None
     audit: str = "stderr"
     tenant_claim: str = "tenant_id"
     require_auth_for_remote: bool = True
