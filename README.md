@@ -10,7 +10,7 @@ pip install mcp-doorman          # core (dependency-light)
 pip install "mcp-doorman[mcp]"   # + the official MCP transport
 ```
 
-> **Status:** beta (`0.1.0`). The five security guarantees are implemented and covered by
+> **Status:** beta (`0.2.0`). The five security guarantees are implemented and covered by
 > an offline test suite. The MCP wire transport is built on the official `mcp` SDK and is
 > evolving toward the 2026-07-28 spec revision — see [Known limits](#known-limits--honest-caveats).
 
