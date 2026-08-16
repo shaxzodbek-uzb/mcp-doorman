@@ -1,5 +1,9 @@
 # mcp-doorman
 
+[![PyPI](https://img.shields.io/pypi/v/mcp-doorman.svg)](https://pypi.org/project/mcp-doorman/)
+[![Python](https://img.shields.io/pypi/pyversions/mcp-doorman.svg)](https://pypi.org/project/mcp-doorman/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **Secure-by-default FastAPI→MCP bridge.** FastMCP gives you the tools; this gives you the
 seatbelts — deny-by-default exposure, scope→tool authorization that fails **closed** (even
 on STDIO), built-in rate limiting, PII redaction at the source, and a structured audit
