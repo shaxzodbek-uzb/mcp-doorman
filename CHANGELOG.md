@@ -6,6 +6,31 @@ All notable changes to `mcp-doorman` are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-08-16
+
+### Added
+- **Per-caller cost budget.** `Doorman(budget="1000/day per_caller")` counts the
+  cost of calls rather than their number, so a tool that hits a paid API can be
+  weighted above a cheap lookup. `expose(cost=...)` declares what one call is
+  worth; unannotated tools cost `1.0`.
+- `BudgetExceeded`, raised when the allowance is spent. It subclasses
+  `RateLimited`, so existing `except RateLimited` handlers and the integration
+  layer's status mapping keep working — but a client that wants to can now tell
+  *calling too fast* (fixed by backing off) from *calling too expensively*
+  (usually not).
+- `Doorman.remaining_budget(tool=, caller=)`.
+- Budgets are **off by default**. A cost unit means nothing until a deployment
+  defines one, and a guessed default would be security theatre.
+
+### Fixed
+- **`expose(rate=...)` was accepted and then never enforced.** A per-tool rate
+  override was parsed into the tool spec and silently dropped, so a tool marked
+  `rate="5/min per_caller"` was limited only by the Doorman-wide rate. Per-tool
+  overrides now apply *in addition to* the global limit — tightening one tool
+  cannot loosen the rest.
+- A malformed `rate=` spec now fails at decoration time rather than on the first
+  call in production.
+
 ## [0.1.0] — 2026-06-20
 
 Initial beta. The five secure-by-default guarantees, implemented as a dependency-light,
@@ -41,5 +66,6 @@ offline-testable core with a lazy-imported MCP transport.
 - The Origin / DNS-rebinding check promised by the integration is now actually implemented
   and wired to `allowed_origins`; `scan_app` fails closed on routes with unknown methods.
 
-[Unreleased]: https://github.com/shaxzodbek-uzb/mcp-doorman/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/shaxzodbek-uzb/mcp-doorman/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/shaxzodbek-uzb/mcp-doorman/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/shaxzodbek-uzb/mcp-doorman/releases/tag/v0.1.0

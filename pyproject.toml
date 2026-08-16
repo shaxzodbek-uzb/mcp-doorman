@@ -1,6 +1,6 @@
 [project]
 name = "mcp-doorman"
-version = "0.1.0"
+version = "0.2.0"
 description = "Secure-by-default FastAPI->MCP bridge. Deny-by-default exposure, scope->tool auth that fails closed (even on STDIO), built-in rate limiting, PII redaction at the source, and a structured audit log — in-process, no gateway."
 readme = "README.md"
 requires-python = ">=3.10"

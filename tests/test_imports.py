@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
 import sys
 
 import pytest
@@ -24,7 +25,9 @@ def test_core_does_not_import_mcp_or_fastapi():
 def test_all_exports_are_importable():
     import mcp_doorman
 
-    assert mcp_doorman.__version__ == "0.1.0"
+    # Against the packaged metadata rather than a literal, so this catches the two
+    # drifting apart without needing an edit at every release.
+    assert mcp_doorman.__version__ == importlib.metadata.version("mcp-doorman")
     for name in mcp_doorman.__all__:
         assert hasattr(mcp_doorman, name), f"missing export: {name}"
 
